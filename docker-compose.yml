@@ -1,0 +1,36 @@
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n
+    container_name: n8n
+    restart: unless-stopped
+    ports:
+      - "5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=America/Sao_Paulo
+      - TZ=America/Sao_Paulo
+      # Permite require('fs') e require('js-yaml') no Code node (ler o config.yaml).
+      - NODE_FUNCTION_ALLOW_BUILTIN=fs
+      - NODE_FUNCTION_ALLOW_EXTERNAL=js-yaml
+      # Execução clássica em processo: garante que fs/js-yaml/this.helpers
+      # funcionem como descrito nos Code nodes.
+      - N8N_RUNNERS_ENABLED=false
+      # O Code node "Classificar" chama o Ollama (modelo LOCAL, ~24s/email na CPU).
+      # O task runner do n8n mata Code nodes que passam de 300s por padrão; com lote
+      # grande no backfill isso estoura. Sobe o limite p/ 30min (1800s).
+      - N8N_RUNNERS_TASK_TIMEOUT=1800
+      # O histórico de execuções cresce sem limite (o database.sqlite já passou de 250 MB,
+      # e o watchdog copia esse arquivo inteiro a cada checagem). 14 dias é folga de sobra
+      # para diagnóstico — a janela do watchdog é de horas.
+      - EXECUTIONS_DATA_PRUNE=true
+      - EXECUTIONS_DATA_MAX_AGE=336
+      - EXECUTIONS_DATA_PRUNE_MAX_COUNT=500
+    # Teto de segurança: em operação o n8n fica em ~280 MB. Se passar disso é vazamento,
+    # e é melhor o container morrer e reiniciar do que competir por RAM com o Ollama.
+    mem_limit: 1g
+    # Permite o container alcançar o Ollama rodando no host (Linux).
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ~/.n8n:/home/node/.n8n
+      # config.yaml versionado no repo, montado read-only dentro do container.
+      - ./config.yaml:/home/node/.n8n/config.yaml:ro

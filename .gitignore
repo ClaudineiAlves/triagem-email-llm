@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Configuração local do Claude Code e anotações pessoais
+.claude/
+VERIFICAR-AMANHA.md
+
+# Pacotes gerados na migração para a VM (contêm a credencial do Gmail)
+*.tar.gz
+
+# Segredos
+.env
+.env.*

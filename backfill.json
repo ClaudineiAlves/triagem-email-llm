@@ -1,0 +1,162 @@
+{
+  "name": "Backfill Triagem (agendado)",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 9,
+              "triggerAtMinute": 0
+            },
+            {
+              "field": "days",
+              "daysInterval": 1,
+              "triggerAtHour": 21,
+              "triggerAtMinute": 0
+            }
+          ]
+        }
+      },
+      "name": "2x por dia (09:00 e 21:00)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -160,
+        300
+      ],
+      "id": "schedule-backfill"
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "getAll",
+        "returnAll": false,
+        "limit": 60,
+        "simple": true,
+        "filters": {
+          "q": "-has:userlabels"
+        }
+      },
+      "name": "Buscar emails (conta toda)",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        80,
+        300
+      ],
+      "id": "buscar-emails-backfill",
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_ME",
+          "name": "Gmail account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000
+    },
+    {
+      "id": "1a000000-0000-4000-8000-000000000002",
+      "name": "Classificar",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        340,
+        300
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Code node \"Classificar\" — modo: Run Once for All Items, linguagem: JavaScript.\n// Lê config.yaml, classifica via Ollama (modelo LOCAL), valida o JSON e resolve labelIds.\n// Falha de rede/parse -> _Revisar (nunca trava a fila, nunca reprocessa em loop).\n\nconst fs = require('fs');\nconst yaml = require('js-yaml');\n// js-yaml v4: load() já usa o schema seguro (não executa código). Alias só para legibilidade.\nconst parseYaml = yaml.load.bind(yaml);\n\nconst cfg = parseYaml(fs.readFileSync('/home/node/.n8n/config.yaml', 'utf8'));\n\nconst model = cfg.model || 'llama3.1';\n// URL do Ollama vista de DENTRO do container (ver docker-compose.yml / README).\nconst ollamaUrl = (cfg.ollama_url || 'http://host.docker.internal:11434').replace(/\\/+$/, '');\nconst threshold = typeof cfg.confidence_threshold === 'number' ? cfg.confidence_threshold : 0.6;\nconst keepAlive = cfg.ollama_keep_alive || '2m';\nconst numCtx = typeof cfg.ollama_num_ctx === 'number' ? cfg.ollama_num_ctx : 1024;\nconst fallbackLabel = cfg.fallback_label || '_Revisar';\nconst actionLabel = cfg.action_label || 'Ação necessária';\nconst multiLabel = cfg.multi_label === true;\nconst allowed = cfg.categories.map((c) => c.name);\nconst labelIds = cfg.gmail_label_ids || {};\nconst catLines = cfg.categories.map((c) => `- ${c.name}: ${c.description}`).join('\\n');\n// Remetentes que nunca geram \"Ação necessária\" — ver never_action_senders no config.yaml.\nconst neverAction = (cfg.never_action_senders || []).map((s) => String(s).toLowerCase());\n\nfunction idFor(name) {\n  const id = labelIds[name];\n  if (!id) {\n    throw new Error(`Sem ID de label para \"${name}\" em gmail_label_ids (config.yaml). Veja o README.`);\n  }\n  return id;\n}\n\n// O Gmail Trigger (Simplify off) devolve from/subject como objeto\n// ({value:[{address,name}], text, html}); o modelo precisa de string limpa.\nfunction asText(v) {\n  if (v == null) return '';\n  if (typeof v === 'string') return v;\n  if (typeof v === 'object') {\n    if (typeof v.text === 'string') return v.text;\n    const a = Array.isArray(v.value) && v.value[0];\n    if (a) return a.name ? `${a.name} <${a.address}>` : (a.address || '');\n  }\n  return String(v);\n}\n\nconst out = [];\n\nfor (const item of $input.all()) {\n  const j = item.json;\n\n  // Extração defensiva (campos variam conforme a versão/Simplify do Gmail Trigger).\n  const headers = (j.payload && j.payload.headers) || j.headers || [];\n  const getHeader = (n) =>\n    Array.isArray(headers)\n      ? ((headers.find((h) => (h.name || '').toLowerCase() === n) || {}).value || '')\n      : (headers[n] || '');\n  const subject = asText(j.Subject || j.subject || getHeader('subject'));\n  const from = asText(j.From || j.from || getHeader('from'));\n  const snippet = j.snippet || j.Snippet || '';\n  const messageId = j.id || j.messageId || '';\n\n  let label = fallbackLabel;\n  let needs_action = false;\n  let confidence = 0;\n  let reason = '';\n  let errored = false;\n\n  try {\n    const userPrompt = cfg.prompt_template\n      .replaceAll('{{categories}}', catLines)\n      .replaceAll('{{from}}', from)\n      .replaceAll('{{subject}}', subject)\n      .replaceAll('{{snippet}}', snippet);\n\n    const resp = await this.helpers.httpRequest({\n      method: 'POST',\n      url: `${ollamaUrl}/api/chat`,\n      headers: { 'content-type': 'application/json' },\n      body: {\n        model,\n        stream: false,\n        format: 'json', // Ollama garante JSON sintaticamente válido\n        keep_alive: keepAlive,\n        options: { temperature: 0, num_ctx: numCtx },\n        messages: [\n          { role: 'system', content: cfg.system_prompt },\n          { role: 'user', content: userPrompt },\n        ],\n      },\n      json: true,\n      timeout: 60000, // modelo local pode ter \"cold start\" na 1ª chamada\n    });\n\n    const text = String((resp.message && resp.message.content) || '').trim();\n\n    // Parsing robusto: pega o primeiro objeto JSON mesmo com texto em volta.\n    const match = text.match(/\\{[\\s\\S]*\\}/);\n    const parsed = JSON.parse(match ? match[0] : text);\n\n    confidence = typeof parsed.confidence === 'number' ? parsed.confidence : 0;\n    needs_action = parsed.needs_action === true;\n    reason = String(parsed.reason || '').slice(0, 120);\n    // Label fora da lista permitida -> fallback.\n    label = allowed.includes(parsed.label) ? parsed.label : fallbackLabel;\n  } catch (e) {\n    errored = true;\n    reason = 'erro: ' + (e.message || String(e)).slice(0, 120);\n    label = fallbackLabel;\n    confidence = 0;\n  }\n\n  // Corte determinístico: o modelo insiste em marcar alerta automático de vaga como\n  // ação, mesmo com esses casos listados no prompt como exemplos de false.\n  const fromLower = from.toLowerCase();\n  if (needs_action && neverAction.some((s) => fromLower.includes(s))) {\n    needs_action = false;\n    reason = (reason ? reason + ' | ' : '') + 'ação suprimida: remetente automático';\n  }\n\n  // Baixa confiança -> revisão (não chuta com confiança baixa).\n  const finalLabel = (!errored && confidence >= threshold) ? label : fallbackLabel;\n\n  const names = [finalLabel];\n  if (multiLabel && needs_action && finalLabel !== fallbackLabel) {\n    names.push(actionLabel);\n  }\n\n  const finalLabelIds = names.map(idFor);\n\n  out.push({\n    json: { messageId, from, subject, snippet, finalLabel, finalLabelIds, confidence, needs_action, reason, error: errored },\n  });\n}\n\n// Lote terminado: devolve os ~5,6 GB do modelo em vez de esperar o keep_alive expirar.\n// keep_alive: 0 com messages vazio é a forma que o Ollama expõe para descarregar.\n// Best-effort — falhar aqui não pode invalidar a classificação que já foi feita.\ntry {\n  await this.helpers.httpRequest({\n    method: 'POST',\n    url: `${ollamaUrl}/api/chat`,\n    headers: { 'content-type': 'application/json' },\n    body: { model, keep_alive: 0, messages: [] },\n    json: true,\n    timeout: 15000,\n  });\n} catch (e) {\n  // sem unload o modelo sai sozinho quando o keep_alive vence; não é motivo de falha.\n}\n\nreturn out;\n"
+      },
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "1a000000-0000-4000-8000-000000000003",
+      "name": "Aplicar label",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        580,
+        200
+      ],
+      "parameters": {
+        "resource": "message",
+        "operation": "addLabels",
+        "messageId": "={{ $json.messageId }}",
+        "labelIds": "={{ $json.finalLabelIds }}"
+      },
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "REPLACE_ME",
+          "name": "Gmail account"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 4,
+      "waitBetweenTries": 5000,
+      "onError": "continueRegularOutput"
+    },
+    {
+      "id": "1a000000-0000-4000-8000-000000000004",
+      "name": "Log",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        580,
+        440
+      ],
+      "parameters": {
+        "mode": "runOnceForAllItems",
+        "language": "javaScript",
+        "jsCode": "// Code node \"Log\" — modo: Run Once for All Items, linguagem: JavaScript.\n// Anexa uma linha JSON estruturada por email em /home/node/.n8n/triagem-log.jsonl\n// (persistido no host via volume ~/.n8n). Serve para auditar acertos e refinar o prompt.\n\nconst fs = require('fs');\nconst LOG_PATH = '/home/node/.n8n/triagem-log.jsonl';\n\n// Recebe a saída do \"Classificar\" diretamente (ramo paralelo ao \"Aplicar label\"),\n// então $input já traz finalLabel/from/subject/confidence/etc. — sem depender do\n// nome do nó anterior (robusto a renomeações na importação).\nfor (const item of $input.all()) {\n  const j = item.json;\n  const line =\n    JSON.stringify({\n      ts: new Date().toISOString(),\n      messageId: j.messageId,\n      from: j.from,\n      subject: j.subject,\n      label: j.finalLabel,\n      confidence: j.confidence,\n      needs_action: j.needs_action,\n      error: j.error,\n      // Sem isto a causa da falha se perde: o Classificar monta 'erro: <mensagem>' em\n      // reason, e sem ela não dá para saber se foi timeout, parse ou rede. Em 18/08\n      // dois emails caíram em _Revisar e o motivo era inauditável.\n      reason: j.reason,\n    }) + '\\n';\n  fs.appendFileSync(LOG_PATH, line);\n}\n\nreturn $input.all();\n"
+      }
+    }
+  ],
+  "connections": {
+    "Buscar emails (conta toda)": {
+      "main": [
+        [
+          {
+            "node": "Classificar",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Classificar": {
+      "main": [
+        [
+          {
+            "node": "Aplicar label",
+            "type": "main",
+            "index": 0
+          },
+          {
+            "node": "Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "2x por dia (09:00 e 21:00)": {
+      "main": [
+        [
+          {
+            "node": "Buscar emails (conta toda)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

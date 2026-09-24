@@ -1,0 +1,7 @@
+[Unit]
+Description=Watchdog da triagem de email (n8n + Ollama)
+
+[Service]
+Type=oneshot
+# Caminho do repositório (%h = sua home). Ajuste se clonou em outro lugar.
+ExecStart=%h/email_agent/watchdog.py --quiet

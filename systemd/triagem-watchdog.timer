@@ -1,0 +1,15 @@
+[Unit]
+Description=Checa duas vezes por dia se a triagem de email continua funcionando
+
+[Timer]
+# A triagem roda 2x por dia (09:00 e 21:00) — um check por rodada, 1h30 depois de cada
+# uma, que é folga suficiente para o lote terminar (60 emails no modelo local levam
+# dezenas de minutos). Checar de hora em hora não descobria nada de novo e ainda copiava
+# o database.sqlite (250 MB) do container a cada hora.
+OnCalendar=*-*-* 10:30
+OnCalendar=*-*-* 22:30
+# Máquina desligada no horário: roda assim que ligar, em vez de pular o check em silêncio.
+Persistent=true
+
+[Install]
+WantedBy=timers.target
