@@ -12,3 +12,6 @@ VERIFICAR-AMANHA.md
 # Segredos
 .env
 .env.*
+
+# Configuração local: IDs dos labels do Gmail de cada conta (modelo em config.example.yaml)
+config.yaml
