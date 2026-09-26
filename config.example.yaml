@@ -1,3 +1,6 @@
+# Modelo do config.yaml. Copie com `cp config.example.yaml config.yaml` e troque os
+# IDs de gmail_label_ids pelos da sua conta (README → setup, passo 4).
+
 # config.yaml — categorias, prompt e parâmetros da triagem.
 # Trocar uma categoria ou ajustar o prompt aqui NÃO exige mexer no fluxo n8n.
 # Este arquivo é montado dentro do container em /home/node/.n8n/config.yaml.
@@ -88,16 +91,16 @@ categories:
 # O fluxo aplica labels POR ID (a API do Gmail não aceita por nome).
 # Preencha uma vez (ver README -> "Descobrir os IDs dos labels").
 gmail_label_ids:
-  "Trabalho/Projetos": "Label_2"
-  "Vagas/Carreira": "Label_12"
-  "Faculdade/PUC": "Label_4"
-  "Financeiro": "Label_5"
-  "Pessoal": "Label_6"
-  "Newsletters": "Label_7"
-  "Promoções": "Label_8"
-  "Contas/Segurança": "Label_14"
-  "Ação necessária": "Label_9"
-  "_Revisar": "Label_10"
+  "Trabalho/Projetos": "Label_101"
+  "Vagas/Carreira": "Label_102"
+  "Faculdade/PUC": "Label_103"
+  "Financeiro": "Label_104"
+  "Pessoal": "Label_105"
+  "Newsletters": "Label_106"
+  "Promoções": "Label_107"
+  "Contas/Segurança": "Label_108"
+  "Ação necessária": "Label_109"
+  "_Revisar": "Label_110"
 
 # Prompt de sistema (mantém a saída em JSON puro).
 system_prompt: >
